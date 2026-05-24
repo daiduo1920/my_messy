@@ -1,3 +1,6 @@
-*.appx filter=lfs diff=lfs merge=lfs -text
 *.exe filter=lfs diff=lfs merge=lfs -text
 *.zip filter=lfs diff=lfs merge=lfs -text
+documents/Automation[[:space:]]Text.pptx filter=lfs diff=lfs merge=lfs -text
+documents/自动化学习/全栈软件测试自动化[[:space:]]Selenium和Appium.pdf filter=lfs diff=lfs merge=lfs -text
+documents/自动化学习/图灵程序设计丛书_Python_高手进阶之路_套装全10册.pdf filter=lfs diff=lfs merge=lfs -text
+*.pptx filter=lfs diff=lfs merge=lfs -text

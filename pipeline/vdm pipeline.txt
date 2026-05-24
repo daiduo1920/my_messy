@@ -1,0 +1,436 @@
+@Library('ATCLibraries')
+import com.bba.atc.jenkins.pipeline.Pipeline
+import com.bba.atc.jenkins.pipeline.PipelineImpl
+Pipeline jenkinsPipeline = new PipelineImpl(this)
+
+def issue = null
+boolean isPythonTest = false
+def buildlog = null
+def hasFixVer = false
+def fixVerJson = null
+def testIssueKeys = null
+def response = null
+
+pipeline {
+
+	agent { label '43_python3.9' }
+
+    environment {
+	    // FOR PROD ENV CONFIG
+        JIRA_URL = 'https://atc.bmw-brilliance.cn/jira'
+        JIRA_SITE = 'JIRA-PROD'
+        JIRA_CRED = credentials('jira_prod_env_technical')
+        XRAY_CONFIG_ID = 'c9de587e-4069-4351-afb5-cc66144462fc'
+        NETWORK_DIRVE = '\\\\\\\\nv19887001\\\\Ansible_Share_PROD'
+        NETWORK_DIRVE_2 = '\\\\\\\\\\\\\\\\nv19887001\\\\Ansible_Share_PROD'
+		JENKINS_URL = 'https://atc.bmw-brilliance.cn/jenkins/'
+    }
+
+    options {
+        timestamps()
+    }
+
+    parameters {
+        string(name: 'issueKey', description: 'IssueKey')
+        booleanParam(defaultValue: true, name: 'isSendMail', description: 'Send a mail?')
+        booleanParam(defaultValue: false, name: 'onlySendMailOnFailure', description: 'Only send mail on failure?')
+        string(defaultValue: '[Automation Testing Notification] ${PROJECT_NAME} - Build # ${BUILD_NUMBER} - ${BUILD_STATUS}!', name: 'mailSubject', description: 'Mail Subject')
+        string(defaultValue: 'Meixu.Chen@partner.bmw-brilliance.cn', name: 'mailTo', description: 'Mail To')
+		string(name: 'target_url', defaultValue: 'https://atc.bmw-brilliance.cn/bitbucket/scm/bbfautomationtest/vdm.git', description: '')
+        string(name: 'target_branch', defaultValue: 'master', description: '')
+		string(name: 'dir_path', defaultValue: 'C:/pytest_bdd/bitbucket/atc-pytestbdd-framework', description: '')
+		string(name: 'run_path', defaultValue: 'C:/pytest_bdd/bitbucket/atc-pytestbdd-framework', description: '')
+
+    }
+
+    stages {
+        stage('Clean Workspace') {
+            steps {
+                dir(params.dir_path){
+			        println "Delete " + params.dir_path
+				    deleteDir()
+			    }
+			    dir(params.dir_path+'@tmp'){
+				    deleteDir()
+                }
+		    }//steps
+        } //stage
+
+        stage('Get Jira Issue') {
+            steps {
+                script {
+
+					def isPython = {
+						labels ->
+							for (label in labels) {
+								if ('Python' == label.toString()) {
+									return true
+								}
+							}
+							return false
+					}
+
+					try{
+						issue = jiraGetIssue idOrKey: "$issueKey"
+					}catch(all){
+						issue = jiraGetIssue idOrKey: "$issueKey"
+					}
+					def labels = issue.data.fields.labels
+					println labels.toString()
+
+					isPythonTest = isPython(labels)
+				} //script
+            } //steps
+        } //stage
+
+        stage('Before Test') {
+            parallel {
+                stage('Download Attachment from JIRA') {
+                    steps {
+                        script {
+                            if (issue.data.fields.issuetype.name == 'Test') {
+								testIssueKeys = "$issueKey"
+                                for (attachment in issue.data.fields.attachment) {
+                                    jiraDownloadAttachment file: "/autotest/$BUILD_TAG/attachment/$attachment.filename", id: "$attachment.id", override: true
+                                }
+                            } else if (issue.data.fields.issuetype.name == 'Test Plan' || issue.data.fields.issuetype.name == 'Test Set') {
+                                def issuetype = issue.data.fields.issuetype.name.replaceAll("\\s*", "").toLowerCase()
+
+								if(issue.data.fields.issuetype.name == 'Test Plan'){
+									def fixVersions = issue.data.fields.fixVersions
+									if(fixVersions != null && fixVersions.size()>0){
+										hasFixVer = true
+										println fixVersions
+										for(fixVer in fixVersions){
+											if(fixVerJson == null){
+												fixVerJson = '{"id":"'+fixVer.id+'"}'
+											}else{
+												fixVerJson = fixVerJson + ',{"id":"'+fixVer.id+'"}'
+											}
+										}
+										fixVerJson = '{"update":{"fixVersions":[{"set":['+fixVerJson+']}]}}'
+									}
+									println fixVerJson
+								}
+
+                                int page = 1
+                                bat 'curl -o tests.json -H "Content-Type: application/json" -X GET -u '+JIRA_CRED+' '+JIRA_URL+'/rest/raven/1.0/api/' + issuetype + '/' + issueKey + '/test?page=' + page
+                                def tests = readJSON file: 'tests.json'
+
+                                while (tests.size() > 0) {
+                                    for (test in tests) {
+										try{
+											testIssue = jiraGetIssue idOrKey: "$test.id"
+											if(testIssueKeys == null){
+												testIssueKeys = testIssue.data.key
+											}else{
+												testIssueKeys = testIssueKeys + ',' + testIssue.data.key
+											}
+											for (attachment in testIssue.data.fields.attachment) {
+												jiraDownloadAttachment file: "/autotest/$BUILD_TAG/attachment/$attachment.filename", id: "$attachment.id", override: true
+											}
+										}catch(all){
+											println all
+										}
+                                    }
+                                    bat 'curl -o tests.json -H "Content-Type: application/json" -X GET -u '+JIRA_CRED+' '+JIRA_URL+'/rest/raven/1.0/api/' + issuetype + '/' +issueKey+ '/test?page=' + ++page
+                                    tests = readJSON file: 'tests.json'
+                                }
+                            }
+                        }
+                    } //steps
+                } //stage
+
+                stage('Download scripts from Bitbucket') {
+                    steps {
+						script {
+							println "=======>>check out from bitbucket<<========"
+							if (isPythonTest){
+								dir(params.dir_path){
+									script{
+										jenkinsPipeline.gitCheckout(env.target_url,env.target_branch)
+									}
+								}
+							}
+						}
+                    } //steps
+                } //stage
+            } //parallel
+        } //stage
+
+        stage('Export features from Xray') {
+            steps {
+                step([$class: 'XrayExportBuilder', filePath: "${params.run_path}\\bdd\\bba_feature", issues: "$issueKey", serverInstance: "$XRAY_CONFIG_ID"])
+         }
+        }//stage
+
+        stage('Test') {
+            steps {
+                script {
+					catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE')
+                	{
+                	    if (isPythonTest) {
+                            echo "========Python Test========"
+						    dir(params.run_path){
+							    // bat """dir ${params.run_path}"""
+							    println "Create report.json file"
+							    try{
+							        def workspace = env.WORKSPACE
+								    bat 'dir'
+								    bat """set Path=C:\\ProgramData\\Python39;C:\\ProgramData\\Python39\\Scripts;C:\\ProgramData\\Python39\\Lib\\site-packages&&python -m pytest bdd/test_runner.py -v --cucumber-json=Reports/cucumber.json --alluredir ${workspace}/allure-result"""
+								    bat """set Path=C:\\ProgramData\\Python39;C:\\ProgramData\\Python39\\Scripts;C:\\ProgramData\\Python39\\Lib\\site-packages&&python addScreenToJson.py"""
+							    }catch(all){
+							        echo "========Python addScreenToJson========"
+								    echo 'dir'
+								    bat 'python addScreenToJson.py'
+						        }
+						    }
+                        }else {
+                            echo "========没有找到python类型的测试========"
+							error("========没有找到python类型的测试========")
+                        }
+                    }
+                }
+            } //steps
+        } //stage
+
+		stage('Import results to Xray') {
+			steps {
+				script {
+					def urlArray = ['https://lpvtix0atcjr01:8443/jira','https://lpvtix0atcjr02:8443/jira','https://lpvtix0atcjr03:8443/jira','https://lpvtix0atcjr04:8443/jira','https://atc.bmw-brilliance.cn/jira']
+					indexNum=(new Random()).nextInt(4)
+					try{
+						//def cucumberreport = readFile 'Reports/report.json'
+						def cucumberreport = readFile "${params.run_path}/Reports/report.json"
+						println "cucumberreport = "+cucumberreport
+						bat """curl -o executionResponse.json -k -H "Content-Type: application/json" -X POST -u $JIRA_CRED --data @${params.run_path}/Reports/report.json ${urlArray[indexNum]}/rest/raven/1.0/import/execution/cucumber"""
+						response = readJSON file: 'executionResponse.json'
+				    }
+					catch(all){
+					    println "==============Exception=============="
+						println all
+						def reportPath = "${params.run_path}/Reports/report.json"
+				        def reportJSON = readJSON file: reportPath
+				        writeJSON file: 'report_1.json', json: reportJSON
+						bat """curl -o executionResponse.json -k -H "Content-Type: application/json" -X POST -u $JIRA_CRED --data @report_1.json ${urlArray[4]}/rest/raven/1.0/import/execution/cucumber"""
+						response = readJSON file: 'executionResponse.json'
+					}
+					println response
+				}
+			}
+		}
+
+		stage('Post API Response Log To TestExecution') {
+			steps {
+				script {
+					/*def isTestplan = false
+					if (issue.data.fields.issuetype.name.equals('Test Plan')) {
+						isTestplan = true
+					}
+					execIssue = jiraGetIssue idOrKey: response.testExecIssue.key
+					subExecIssues = execIssue.data.fields.customfield_11815
+					println 'subExecIssues = '+subExecIssues
+					def files = bat(script: """ find -name "${params.run_path}/Reports/cucumber.json"  """, returnStdout: true).split()
+				*/
+				println "Skip"
+					/*for (file in files) {
+					    filename = file.replace("./","").replace("report","").replace(".json","")
+					    for(subExecIssue in subExecIssues){
+					       if(filename == subExecIssue.b){
+            					//bat 'curl -o addattachment.json -H "Content-Type: application/json" -X POST -u "$JIRA_CRED" --data @report'+filename+'.json "$JIRA_URL"/rest/raven/1.0/api/testrun/'+subExecIssue.c+'/attachment'
+								bat 'curl -o addattachment.json -H "Content-Type: application/json" -X POST -u '+JIRA_CRED+' --data @report'+filename+'.json '+JIRA_URL+'/rest/raven/1.0/api/testrun/'+subExecIssue.c+'/attachment'
+					            addattachment = readFile file: 'addattachment.json'
+					       }
+                       }
+					} */
+				}
+			}
+		}
+
+		stage('Deal Fix Version Infomation') {
+			steps {
+				script {
+					if (issue.data.fields.issuetype.name.equals('Test Plan')) {
+						def data = readJSON text: '{"add":["' + response.testExecIssue.key + '"]}'
+						writeJSON file: 'data.json', json: data
+						bat 'curl -H "Content-Type: application/json" -X POST -u '+JIRA_CRED+' --data @data.json '+JIRA_URL+'/rest/raven/1.0/api/testplan/'+issueKey+'/testexecution'
+
+						println "hasFixVer = "+hasFixVer
+						if(hasFixVer){
+							def fixVerJsonData = readJSON text: fixVerJson
+							writeJSON file: 'fixVerJsonData.json', json: fixVerJsonData
+
+							bat '''curl -o updatefixVersions.json -H "Content-Type: application/json" -X PUT -u '+JIRA_CRED+' --data @fixVerJsonData.json '+JIRA_URL+'/rest/api/2/issue/'''+response.testExecIssue.key+'''" '''
+							def updatefixVersions = readFile 'updatefixVersions.json'
+							println "updatefixVersions = "+updatefixVersions
+						}
+					}
+				}
+			}
+		}
+
+		 stage('Change resolution and transition status') {
+			steps {
+				script {
+					//bat '''curl -o postresponse.json -H "Content-Type: application/json" -X POST -u '+JIRA_CRED' -d '{"fields": {"resolution": {"name": "Done"}},"transition":{"id":"41"}}' '+JIRA_URL+'/rest/api/2/issue/'''+response.testExecIssue.key+'''/transitions" '''
+					//bat '''curl -o postresponse.json -H "Content-Type: application/json" -X POST -u '+JIRA_CRED+' -d '{"fields": {"resolution": {"name": "Done"}},"transition":{"id":"41"}}' '+JIRA_URL+'/rest/api/2/issue/'''+response.testExecIssue.key+'''/transitions" '''
+					println "Skip"
+					//def postresponse = readFile 'postresponse.json'
+					//println "postresponse = "+postresponse
+				}
+			} //steps
+		} //stage
+
+		stage('Publish Cucumber Report') {
+			steps {
+				cucumber fileIncludePattern: '**/*.json', trendsLimit: -1
+			} //steps
+		}
+    } //stages
+
+    post {
+        always {
+            script {
+				@NonCPS
+				def buildlogpath = {
+					def causes = currentBuild.rawBuild.getCauses()
+					def isFirst = true
+
+					for(cause in causes) {
+						if (cause.class.toString().contains("UpstreamCause")) {
+							isFirst = false
+						} else {
+							isFirst = true
+						}
+					}
+					if(isFirst){
+						buildlog = "${BUILD_URL}console"
+						println "isFirst : true and buildlog : " + buildlog
+					}else{
+						out1 = causes.toString().tokenize("[")
+						size = out1.size()
+						println "isFirst : false and out1 size : " + size
+						if(size>1){
+							out3 = out1[size-2]
+							println "out3 result : " + out3
+							buildlog = "${JENKINS_URL}"+out3+"/console"
+						}else{
+							buildlog = "${BUILD_URL}console"
+						}
+						println "isFirst : false and buildlog : " + buildlog
+					}
+				}
+
+                def sendMail = {
+                    def filepath = "${params.run_path}/Reports/summary_report.html"
+                    def htmlContent = readFile file: filepath
+                    def add = """
+                    <table>
+                        <tr>
+                          <td>
+                            <ul>
+                              <li>
+                                Jira Report:
+                                <a href="https://atc.bmw-brilliance.cn/jira/secure/Dashboard.jspa?selectPageId=30321">
+                                  Link
+                                </a>
+                              </li>
+                              <li>
+                                Jira Issue:
+                                <a href="https://atc.bmw-brilliance.cn/jira/browse/${issueKey}">
+                                 Link
+                                </a>
+                              </li>
+                              <li>
+                                Allure Report:
+                                <a href="${BUILD_URL}allure">
+                                 Link
+                                </a>
+                              </li>
+                            </ul>
+                          </td>
+                        </tr>
+                      </table>
+                    """
+                    def combinedHtmlContent = htmlContent.replaceFirst('</body>',"${add}</body>")
+
+					buildlogpath()
+                    if (Boolean.valueOf(isSendMail.toString()) && (mailTo.trim().length() > 0)) {
+                        emailext body:combinedHtmlContent ,
+                        subject:mailSubject ,
+                        to:mailTo ,
+                        from: 'ATC.AutoNotification@bmw-brilliance.cn'
+                    }
+                }
+
+                if (Boolean.valueOf(onlySendMailOnFailure.toString())) {
+                    def isTestFail = {
+                        element ->
+
+                            for (before in element.before) {
+                                if (before.result.status == "failed") {
+                                    return true
+                                }
+                            }
+                            for (step in element.steps) {
+                                if (step.result.status == "failed") {
+                                    return true
+                                }
+                            }
+                            for (after in element.after) {
+                                if (after.result.status == "failed") {
+                                    return true
+                                }
+                            }
+                            return false
+                    }
+
+                    def data = readJSON file: 'Reports/report.json'
+
+                    for (String element in data[0].elements) {
+
+                        boolean flagTestFail = isTestFail(element)
+
+                        if (flagTestFail) {
+                            sendMail()
+
+                            break
+                        }
+
+                    }
+                } else {
+                    sendMail()
+
+
+                }
+
+				def tmp = "https://10.188.219.130:8443/jenkinsbe/buildByToken/buildWithParameters?job=Xray-Auto-Testing/Update_Xray_Issue_status&token=UpdateXrayIssueStatus_201808081502&issueKey=$issueKey&buildResult=${currentBuild.result}"
+				println "url = "+tmp
+				bat 'curl -k GET "'+tmp+'"'
+
+				allure([
+                    includeProperties: false,
+                    jdk: '',
+                    properties: [],
+                    reportBuildPolicy: 'ALWAYS',
+                    //report: 'allure-report',
+                    results: [[path: 'allure-result']]
+            ])
+
+            }
+            archiveArtifacts artifacts: '*.json, Reports/report.json, bdd/bba_feature/', fingerprint: true
+            //build job: 'Xray-Auto-Testing/Update_Xray_Issue_status', parameters: [string(name: 'issueKey', value: "$issueKey"), string(name: 'buildResult', value: "$currentBuild.result")]
+       cleanWs()
+        } //always
+        success {
+            bat '''
+                if exist /autotest/$BUILD_TAG/ then del /autotest/$BUILD_TAG/
+                '''
+            cleanWs()
+        } //sucess
+        failure {
+            jiraAddComment(idOrKey: params.issueKey, comment: 'Pipeline failed.')
+        } //failure
+    } //post
+
+} //pipeline

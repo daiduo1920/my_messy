@@ -1,0 +1,94 @@
+pipeline {
+    // FOR PROD ENV CONFIG
+    agent {label 'aatf'}
+	
+	environment {
+		// FOR PROD ENV CONFIG
+        JIRA_URL = 'https://atc.bmw-brilliance.cn/jira'
+        JIRA_SITE = 'JIRA-PROD'
+        JIRA_CRED = credentials('jira_prod_env_technical')
+        XRAY_CONFIG_ID = 'c9de587e-4069-4351-afb5-cc66144462fc'
+        NETWORK_DIRVE = '\\\\\\\\nv19887001\\\\Ansible_Share_PROD'
+        
+        // Jmeter Bitbucket repositories information
+        pydd_target_url = 'https://atc.bmw-brilliance.cn/bitbucket/scm/otdautotest/bbf-43_otd_autotest_products.git'
+        pydd_target_branch = 'master'
+		
+		// Jmeter Bitbucket repositories information
+        target_url = 'https://atc.bmw-brilliance.cn/bitbucket/scm/atcautotest/jmeter-autotest-script.git'
+        target_branch = 'master'
+    }
+	
+	parameters {
+        string(name: 'issueKey', description: 'IssueKey')
+    }
+
+    stages {
+		stage('Get Issue Info from JIRA And Test'){
+			steps{
+				println ">>>>>>>>>>>>>>parameters.issueKey = "+issueKey 
+				withCredentials([usernameColonPassword(credentialsId: 'jira_prod_env_technical', variable: 'JIRA_CRED')]) {
+					script {
+						
+						def isJmeterTest = {
+                                    labels ->
+                                        for (label in labels) {
+                                            if ('Jmeter' == label.toString() || 'jmeter' == label.toString()) {
+                                                return true
+                                            }
+                                        }
+                                        return false
+                                }
+								
+						echo "AutoTest-Pipeline-Core-Dispatcher INFO : Get Issue Info from JIRA"
+						def issue = jiraGetIssue idOrKey: "$issueKey"
+						def labels = issue.data.fields.labels
+						def isCucumber = false
+						def isUFT = false
+						def isJmeter = false
+						if (issue.data.fields.issuetype.name.equals('Test')) {	
+							def testtype = issue.data.fields.customfield_11800.value
+							println ">>>>>>>>>>>>>>>>issuetype:Test ; testtype:"+testtype+"<<<<<<<<<<<<<<<<<<<<<<"
+							if(testtype.equals('UFT')){
+								isUFT = true
+							} else if(testtype.equals('Cucumber')){
+								isCucumber = true
+							}
+                        } else if (issue.data.fields.issuetype.name.equals('Test Plan') || issue.data.fields.issuetype.name.equals('Test Set')) {	
+							def issuetype = issue.data.fields.issuetype.name.replaceAll("\\s*", "").toLowerCase()
+							int page = 1
+							sh 'curl -o tests.json -H "Content-Type: application/json" -X GET -u "$JIRA_CRED" "$JIRA_URL"/rest/raven/1.0/api/' + issuetype + '/$issueKey/test?page=' + page
+                            def tests = readJSON file: 'tests.json'
+							isJmeter = isJmeterTest(labels)
+							
+							for (test in tests) {
+								subIssue = jiraGetIssue idOrKey: "$test.id"
+								def testtype = subIssue.data.fields.customfield_11800.value
+								println ">>>>> MainIssue:"+issue.data.key+" , SubIssue:"+subIssue.data.key+" , SubIssueType:Test , SubTestType:"+testtype+"<<<<<<"
+								if(testtype.equals('UFT')){
+									isUFT = true
+								} else if(testtype.equals('Cucumber')){
+									isCucumber = true
+								}
+                            }
+                        }
+						if(isCucumber){
+							println ">--build Xray-AutoTest-Pipeline-Dispatcher Cucumber job-->"
+							build job: 'SmartMaintenance/DEV/Automation_Test_Management/Smart_Maintenance_Automation_Test', parameters: [string(name: 'issueKey', value: "$issueKey")],wait:false
+						}
+						if(isUFT){
+							println ">--build Xray-AutoTest-Pipeline-Dispatcher UFT job-->"
+							build job: 'Xray-Auto-Testing/Autotest-Pipeline/Default-Autotest/ATC-UFTTest', parameters: [string(name: 'issueKey', value: "$issueKey")],wait:false
+							
+							
+						}
+						if(isJmeter){
+							println ">--build Xray-AutoTest-Pipeline-Dispatcher Jmeter job-->"
+							build job: 'Xray-Auto-Testing/Autotest-Pipeline/Jmeter_Autotest/Jmeter_Core_Prod', parameters: [string(name: 'issueKey', value: "$issueKey"), string(name: 'target_url', value: "$env.target_url"), string(name: 'target_branch', value: "$env.target_branch")],wait:false
+						}
+                    }
+				}
+            }
+        }
+    }
+}

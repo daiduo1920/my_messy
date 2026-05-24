@@ -1,3 +1,13 @@
+
+
+spy++
+
+
+
+FastStoneCapturecn  录屏工具
+
+
+
 charles  在线破解工具  https://www.zzzmode.com/mytools/charles/
 
 
@@ -50,7 +60,5 @@ pairs正交：
 
 适中	青年	女
 
-瘦	儿童	
-
-
+瘦	儿童
 
